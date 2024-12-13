@@ -4,179 +4,120 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"math/rand"
 	"os"
 	"strconv"
-	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
-	"github.com/Azure/go-amqp"
 )
 
 func getOrdersFromQueue() ([]Order, error) {
 	ctx := context.Background()
-
 	var orders []Order
 
 	// Get queue name from environment variable
 	orderQueueName := os.Getenv("ORDER_QUEUE_NAME")
 	if orderQueueName == "" {
-		log.Printf("ORDER_QUEUE_NAME is not set")
-		return nil, errors.New("ORDER_QUEUE_URI is not set")
+			log.Printf("ORDER_QUEUE_NAME is not set")
+			return nil, errors.New("ORDER_QUEUE_NAME is not set")
 	}
 
-	// check if USE_WORKLOAD_IDENTITY_AUTH is set
+	// Check if using Workload Identity Authentication
 	useWorkloadIdentityAuth := os.Getenv("USE_WORKLOAD_IDENTITY_AUTH")
 	if useWorkloadIdentityAuth == "" {
-		useWorkloadIdentityAuth = "false"
+			useWorkloadIdentityAuth = "false"
 	}
 
-	orderQueueHostName := os.Getenv("AZURE_SERVICEBUS_FULLYQUALIFIEDNAMESPACE")
+	// Get Service Bus hostname
+	orderQueueHostName := os.Getenv("ORDER_QUEUE_HOSTNAME")
 	if orderQueueHostName == "" {
-		orderQueueHostName = os.Getenv("ORDER_QUEUE_HOSTNAME")
+			log.Printf("ORDER_QUEUE_HOSTNAME is not set")
+			return nil, errors.New("ORDER_QUEUE_HOSTNAME is not set")
 	}
 
-	if orderQueueHostName != "" && useWorkloadIdentityAuth == "true" {
-		cred, err := azidentity.NewDefaultAzureCredential(nil)
-		if err != nil {
-			log.Fatalf("failed to obtain a workload identity credential: %v", err)
-		}
-
-		client, err := azservicebus.NewClient(orderQueueHostName, cred, nil)
-		if err != nil {
-			log.Fatalf("failed to obtain a service bus client with workload identity credential: %v", err)
-		} else {
-			fmt.Println("successfully created a service bus client with workload identity credentials")
-		}
-
-		receiver, err := client.NewReceiverForQueue(orderQueueName, nil)
-		if err != nil {
-			log.Fatalf("failed to create receiver: %v", err)
-		}
-		defer receiver.Close(context.TODO())
-
-		messages, err := receiver.ReceiveMessages(context.TODO(), 10, nil)
-		if err != nil {
-			log.Fatalf("failed to receive messages: %v", err)
-		}
-
-		for _, message := range messages {
-			log.Printf("message received: %s\n", string(message.Body))
-
-			// First, unmarshal the JSON data into a string
-			var jsonStr string
-			err = json.Unmarshal(message.Body, &jsonStr)
+	if useWorkloadIdentityAuth == "true" {
+			// Use Azure Workload Identity Authentication
+			cred, err := azidentity.NewDefaultAzureCredential(nil)
 			if err != nil {
-				log.Printf("failed to deserialize message: %s", err)
-				return nil, err
+					log.Fatalf("failed to obtain a workload identity credential: %v", err)
 			}
 
-			// Then, unmarshal the string into an Order
-			order, err := unmarshalOrderFromQueue([]byte(jsonStr))
+			client, err := azservicebus.NewClient(orderQueueHostName, cred, nil)
 			if err != nil {
-				log.Printf("failed to unmarshal message: %v", err)
-				return nil, err
+					log.Fatalf("failed to create service bus client: %v", err)
+			}
+			defer client.Close(ctx)
+
+			receiver, err := client.NewReceiverForQueue(orderQueueName, nil)
+			if err != nil {
+					log.Fatalf("failed to create receiver: %v", err)
+			}
+			defer receiver.Close(ctx)
+
+			messages, err := receiver.ReceiveMessages(ctx, 10, nil)
+			if err != nil {
+					log.Fatalf("failed to receive messages: %v", err)
 			}
 
-			// Add order to []order slice
-			orders = append(orders, order)
+			for _, message := range messages {
+					log.Printf("message received: %s\n", string(message.Body))
 
-			err = receiver.CompleteMessage(context.TODO(), message, nil)
-			if err != nil {
-				log.Fatalf("failed to complete message: %v", err)
-			}
-		}
-	} else {
-		// Get order queue connection string from environment variable
-		orderQueueUri := os.Getenv("ORDER_QUEUE_URI")
-		if orderQueueUri == "" {
-			log.Printf("ORDER_QUEUE_URI is not set")
-			return nil, errors.New("ORDER_QUEUE_URI is not set")
-		}
-
-		// Get queue username from environment variable
-		orderQueueUsername := os.Getenv("ORDER_QUEUE_USERNAME")
-		if orderQueueName == "" {
-			log.Printf("ORDER_QUEUE_USERNAME is not set")
-			return nil, errors.New("ORDER_QUEUE_USERNAME is not set")
-		}
-
-		// Get queue password from environment variable
-		orderQueuePassword := os.Getenv("ORDER_QUEUE_PASSWORD")
-		if orderQueuePassword == "" {
-			log.Printf("ORDER_QUEUE_PASSWORD is not set")
-			return nil, errors.New("ORDER_QUEUE_PASSWORD is not set")
-		}
-
-		// Connect to order queue
-		conn, err := amqp.Dial(ctx, orderQueueUri, &amqp.ConnOptions{
-			SASLType: amqp.SASLTypePlain(orderQueueUsername, orderQueuePassword),
-		})
-		if err != nil {
-			log.Printf("%s: %s", "failed to connect to order queue", err)
-			return nil, err
-		}
-		defer conn.Close()
-
-		session, err := conn.NewSession(ctx, nil)
-		if err != nil {
-			log.Printf("unable to create a new session")
-		}
-
-		{
-			// create a receiver
-			receiver, err := session.NewReceiver(ctx, orderQueueName, nil)
-			if err != nil {
-				log.Printf("creating receiver link: %s", err)
-				return nil, err
-			}
-			defer func() {
-				ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
-				receiver.Close(ctx)
-				cancel()
-			}()
-
-			for {
-				log.Printf("getting orders")
-
-				ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
-				defer cancel()
-
-				// receive next message
-				msg, err := receiver.Receive(ctx, nil)
-				if err != nil {
-					if err.Error() == "context deadline exceeded" {
-						log.Printf("no more orders for you: %v", err.Error())
-						break
-					} else {
-						return nil, err
+					var order Order
+					if err := json.Unmarshal(message.Body, &order); err != nil {
+							log.Printf("failed to unmarshal message: %v", err)
+							return nil, err
 					}
-				}
 
-				messageBody := string(msg.GetData())
-				log.Printf("message received: %s\n", messageBody)
+					orders = append(orders, order)
 
-				order, err := unmarshalOrderFromQueue(msg.GetData())
-				if err != nil {
-					log.Printf("failed to unmarshal message: %s", err)
-					return nil, err
-				}
-
-				// Add order to []order slice
-				orders = append(orders, order)
-
-				// accept message
-				if err = receiver.AcceptMessage(context.TODO(), msg); err != nil {
-					log.Printf("failure accepting message: %s", err)
-					// remove the order from the slice so that we pick it up on the next run
-					orders = orders[:len(orders)-1]
-				}
+					if err := receiver.CompleteMessage(ctx, message, nil); err != nil {
+							log.Printf("failed to complete message: %v", err)
+					}
 			}
-		}
+	} else {
+			// Use Shared Access Policy Authentication
+			connectionString := os.Getenv("AZURE_SERVICE_BUS_CONNECTION_STRING")
+			if connectionString == "" {
+					log.Printf("AZURE_SERVICE_BUS_CONNECTION_STRING is not set")
+					return nil, errors.New("AZURE_SERVICE_BUS_CONNECTION_STRING is not set")
+			}
+
+			client, err := azservicebus.NewClientFromConnectionString(connectionString, nil)
+			if err != nil {
+					log.Fatalf("failed to create service bus client: %v", err)
+			}
+			defer client.Close(ctx)
+
+			receiver, err := client.NewReceiverForQueue(orderQueueName, nil)
+			if err != nil {
+					log.Fatalf("failed to create receiver: %v", err)
+			}
+			defer receiver.Close(ctx)
+
+			messages, err := receiver.ReceiveMessages(ctx, 10, nil)
+			if err != nil {
+					log.Fatalf("failed to receive messages: %v", err)
+			}
+
+			for _, message := range messages {
+					log.Printf("message received: %s\n", string(message.Body))
+
+					var order Order
+					if err := json.Unmarshal(message.Body, &order); err != nil {
+							log.Printf("failed to unmarshal message: %v", err)
+							return nil, err
+					}
+
+					orders = append(orders, order)
+
+					if err := receiver.CompleteMessage(ctx, message, nil); err != nil {
+							log.Printf("failed to complete message: %v", err)
+					}
+			}
 	}
+
 	return orders, nil
 }
 
