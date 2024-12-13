@@ -37,7 +37,9 @@ func main() {
 	router := gin.Default()
 	router.Use(cors.Default())
 	router.Use(OrderMiddleware(orderService))
-	router.GET("/order/fetch", fetchOrders)
+	router.GET("/order/fetch", func(c *gin.Context) {
+		handleFetchOrders(c, orderService)
+	})
 	router.GET("/order/:id", getOrder)
 	router.PUT("/order", updateOrder)
 	router.GET("/health", func(c *gin.Context) {
@@ -58,14 +60,7 @@ func OrderMiddleware(orderService *OrderService) gin.HandlerFunc {
 }
 
 // Fetches orders from the order queue and stores them in database
-func fetchOrders(c *gin.Context) {
-	client, ok := c.MustGet("orderService").(*OrderService)
-	if !ok {
-		log.Printf("Failed to get order service")
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
-
+func handleFetchOrders(c *gin.Context, orderService *OrderService) {
 	// Get orders from the queue
 	orders, err := getOrdersFromQueue()
 	if err != nil {
@@ -74,8 +69,8 @@ func fetchOrders(c *gin.Context) {
 		return
 	}
 
-	// Save orders to database
-	err = client.repo.InsertOrders(orders)
+	// Save orders to the database
+	err = orderService.repo.InsertOrders(orders)
 	if err != nil {
 		log.Printf("Failed to save orders to database: %s", err)
 		c.AbortWithStatus(http.StatusInternalServerError)
@@ -83,7 +78,7 @@ func fetchOrders(c *gin.Context) {
 	}
 
 	// Return the orders to be processed
-	orders, err = client.repo.GetPendingOrders()
+	orders, err = orderService.repo.GetPendingOrders()
 	if err != nil {
 		log.Printf("Failed to get pending orders from database: %s", err)
 		c.AbortWithStatus(http.StatusInternalServerError)

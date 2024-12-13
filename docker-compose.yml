@@ -28,6 +28,9 @@ services:
     environment:
       - AZURE_SERVICE_BUS_CONNECTION_STRING=${AZURE_SERVICE_BUS_CONNECTION_STRING}
       - ORDER_QUEUE_NAME=${ORDER_QUEUE_NAME}
+      - ORDER_QUEUE_HOSTNAME=${ORDER_QUEUE_HOSTNAME}
+    env_file:
+      - .env
     networks:
       - backend_services
     depends_on:
